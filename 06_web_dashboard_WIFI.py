@@ -1,0 +1,321 @@
+import network
+import socket
+import json
+import time
+from machine import Pin, I2C, PWM
+import neopixel
+import ssd1306  # (추가) OLED
+from ahtx0 import AHT20
+from bh1750 import BH1750 # (추가) 조도
+
+# ---- WiFi 설정 (수업 환경에 맞게 수정) ----
+WIFI_SSID = "202004153"  # 학교/교육장 WiFi 이름
+WIFI_PASSWORD = "smk12345"  # WiFi 비밀번호
+
+# --- 2. 학습된 핀 번호 설정 ---
+I2C_SDA_PIN = 4     # I2C SDA (GP4)
+I2C_SCL_PIN = 5     # I2C SCL (GP5)
+BUZZER_PIN = 22     # 부저 (GP22)
+NEOPIXEL_PIN = 21   # 네오픽셀 (GP21)
+
+# --- 3. (추가) OLED 설정 ---
+OLED_WIDTH = 128
+OLED_HEIGHT = 64
+I2C_ADDR = 0x3C
+
+# --- 4. (수정) 알람 임계값 (전역 변수) ---
+# 기본값을 100만으로 설정하여 "비활성화" 상태로 시작
+HIGH_THRESHOLD = 1000000.0
+alarm_thresholds = {
+    "temperature": HIGH_THRESHOLD,
+    "humidity": HIGH_THRESHOLD,
+    "light": HIGH_THRESHOLD
+}
+
+# --- 5. 하드웨어 초기화 ---
+# I2C 버스 (온습도, 조도, OLED)
+i2c = I2C(0, sda=Pin(I2C_SDA_PIN), scl=Pin(I2C_SCL_PIN), freq=400000)
+
+# 부저
+buzzer = PWM(Pin(BUZZER_PIN))
+buzzer.freq(440)
+buzzer.duty_u16(0)
+
+# 네오픽셀
+np = neopixel.NeoPixel(Pin(NEOPIXEL_PIN), 1)
+
+# OLED 초기화
+try:
+    oled = ssd1306.SSD1306_I2C(OLED_WIDTH, OLED_HEIGHT, i2c, addr=I2C_ADDR)
+    oled.fill(0)
+    oled.text("OLED Init OK", 0, 0)
+    oled.show()
+    print("OLED 초기화 성공")
+except Exception as e:
+    print(f"OLED 초기화 실패: {e}")
+    oled = None 
+
+# --- 6. 센서 객체 생성 (2개 센서) ---
+try:
+    aht_sensor = AHT20(i2c)
+    print("AHT20 (온습도) 초기화 성공")
+    if oled: oled.text("AHT20 OK", 0, 16); oled.show()
+    bh_sensor = BH1750(0x23, i2c)
+    print("BH1750 (조도) 초기화 성공")
+    if oled: oled.text("BH1750 OK", 0, 32); oled.show()
+except Exception as e:
+    print(f"I2C 센서 초기화 실패: {e}")
+    if oled: oled.text("SENSOR FAIL", 0, 16); oled.show()
+    np[0] = (255, 100, 0) 
+    np.write()
+    raise SystemExit
+
+# --- 7. (추가) OLED 텍스트 출력 함수 ---
+def display_text(lines):
+    """OLED에 텍스트 목록(최대 4줄)을 출력합니다."""
+    if oled is None: return
+    oled.fill(0)
+    y_pos = 0
+    for i, line_text in enumerate(lines):
+        if y_pos < OLED_HEIGHT:
+            oled.text(line_text, 0, y_pos)
+            y_pos += 16 
+        else:
+            break
+    oled.show()
+
+# --- (추가) 임계값 포맷팅 함수 ---
+def format_threshold(value):
+    """OLED에 표시할 임계값 텍스트를 포맷합니다."""
+    if value >= HIGH_THRESHOLD:
+        return "OFF"
+    else:
+        return str(value)
+
+# --- 8. (수정) WiFi 연결 함수 (OLED 피드백 추가) ---
+def connect_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    
+    display_text(["WiFi Connecting...", f"{WIFI_SSID[:16]}", "Plz Wait..."])
+
+    if not wlan.isconnected():
+        print(f"WiFi 연결 중... ({WIFI_SSID})")
+        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+
+        timeout = 0
+        while not wlan.isconnected() and timeout < 100: # 10초
+            time.sleep(0.1)
+            timeout += 1
+            print(".", end="")
+            if oled and timeout % 5 == 0:
+                oled.text(".", (timeout % 16) * 8, 48) 
+                oled.show()
+
+        if wlan.isconnected():
+            ip_address = wlan.ifconfig()[0]
+            print(f"\nWiFi 연결 성공!")
+            print(f"IP 주소: {ip_address}")
+            display_text(["WiFi OK!", "IP Address:", f"{ip_address}"])
+            time.sleep(2) 
+            return ip_address
+        else:
+            print("\nWiFi 연결 실패!")
+            display_text(["WiFi FAILED!", "Check SSID/PW", "Retrying..."])
+            time.sleep(2)
+            return None
+    else:
+        ip_address = wlan.ifconfig()[0]
+        print(f"이미 WiFi 연결됨: {ip_address}")
+        display_text(["WiFi Already OK", "IP Address:", f"{ip_address}"])
+        time.sleep(2)
+        return ip_address
+
+# --- 9. LED/부저 제어 함수 (원본 유지) ---
+def led_green():
+    np[0] = (0, 255, 0)
+    np.write()
+
+def led_red():
+    np[0] = (255, 0, 0)
+    np.write()
+
+def buzzer_on():
+    buzzer.duty_u16(30000)
+
+def buzzer_off():
+    buzzer.duty_u16(0)
+
+# --- 10. (수정) 3개 임계값 모두 확인하는 알람 함수 ---
+def check_alarms(temp, hum, light):
+    """모든 센서의 임계값을 확인하고 알람을 울립니다."""
+    global alarm_thresholds # 전역 변수 사용
+    
+    # 3개 중 하나라도 임계값을 넘으면 알람
+    temp_alarm = temp > alarm_thresholds["temperature"]
+    hum_alarm = hum > alarm_thresholds["humidity"]
+    light_alarm = light > alarm_thresholds["light"]
+    
+    if temp_alarm or hum_alarm or light_alarm:
+        buzzer_on()
+        led_red()
+        return True
+    else:
+        buzzer_off()
+        led_green()
+        return False
+
+# --- 11. (수정) 2개 센서 데이터 읽기 함수 ---
+def read_sensors():
+    try:
+        temperature = aht_sensor.temperature
+        humidity = aht_sensor.relative_humidity
+        lux = bh_sensor.measurement
+
+        # (수정) 3개 값을 check_alarms 함수로 전달
+        alarm_active = check_alarms(temperature, humidity, lux)
+
+        return {
+            "temperature": round(temperature, 1),
+            "humidity": round(humidity, 1),
+            "light": round(lux, 1),
+            "timestamp": time.time(),
+            "alarm": alarm_active,
+        }
+    except Exception as e:
+        print(f"센서 읽기 오류: {e}")
+        buzzer_off()
+        return { "error": str(e) }
+
+# --- 12. HTTP 응답 생성 함수 (원본 유지) ---
+def create_response(status_code, content_type, body):
+    response = f"HTTP/1.1 {status_code}\r\n"
+    response += f"Content-Type: {content_type}\r\n"
+    response += "Access-Control-Allow-Origin: *\r\n"
+    response += "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+    response += "Access-Control-Allow-Headers: Content-Type\r\n"
+    response += f"Content-Length: {len(body)}\r\n"
+    response += "Connection: close\r\n"
+    response += "\r\n"
+    response += body
+    return response
+
+# --- 13. 메인 서버 함수 (POST 처리 수정) ---
+def start_server():
+    global alarm_thresholds # 전역 변수 수정 허용
+    
+    ip_address = connect_wifi()
+    if not ip_address:
+        print("WiFi 연결 실패로 서버 시작 불가")
+        display_text(["WiFi FAILED!", "Server STOP."])
+        return
+
+    addr = socket.getaddrinfo("0.0.0.0", 8080)[0][-1]
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(addr)
+    s.listen(5)
+
+    led_green() 
+
+    print(f"서버 시작됨: http://{ip_address}:8080")
+    print("=" * 50)
+    print("📊 IoT 모니터링 대시보드 (WiFi Client 모드)")
+    print(f"센서 API 엔드포인트: http://{ip_address}:8080/sensors")
+    print(f"제어 API 엔드포인트: http://{ip_address}:8080/alarm_threshold (POST)")
+    print("=" * 50)
+    
+    display_text(["Server Running", "Waiting for", "Connection..."])
+
+    while True:
+        try:
+            cl, addr = s.accept()
+            print(f"클라이언트 연결: {addr}")
+
+            request_raw = cl.recv(1024)
+            request = request_raw.decode("utf-8")
+            
+            if not request:
+                cl.close()
+                continue
+                
+            print(f"요청: {request[:100]}...")
+
+            if "OPTIONS" in request:
+                response = create_response(200, "text/plain", "")
+                cl.send(response.encode("utf-8"))
+
+            # (수정) POST /alarm_threshold 요청 처리
+            elif "POST /alarm_threshold" in request:
+                try:
+                    # HTTP Body 부분 찾기
+                    content_length_start = request.find("Content-Length: ") + 16
+                    content_length_end = request.find("\r\n", content_length_start)
+                    content_length = int(request[content_length_start:content_length_end])
+                    
+                    body_start = request.find("\r\n\r\n") + 4
+                    body = request[body_start : body_start + content_length]
+                    
+                    new_thresholds = json.loads(body)
+                    
+                    # 전역 변수 업데이트
+                    if "temperature" in new_thresholds:
+                        alarm_thresholds["temperature"] = float(new_thresholds["temperature"])
+                    if "humidity" in new_thresholds:
+                        alarm_thresholds["humidity"] = float(new_thresholds["humidity"])
+                    if "light" in new_thresholds:
+                        alarm_thresholds["light"] = float(new_thresholds["light"])
+                        
+                    print(f"임계값 업데이트됨: {alarm_thresholds}")
+                    
+                    # (수정) OLED 표시에 format_threshold 함수 적용
+                    t_str = format_threshold(alarm_thresholds['temperature'])
+                    h_str = format_threshold(alarm_thresholds['humidity'])
+                    l_str = format_threshold(alarm_thresholds['light'])
+                    display_text(["Thresholds SET", f"T: {t_str}", f"H: {h_str}", f"L: {l_str}"])
+                    
+                    response = create_response(200, "application/json", json.dumps({"status": "ok", "thresholds": alarm_thresholds}))
+                except Exception as e:
+                    print(f"POST 요청 처리 오류: {e}")
+                    response = create_response(400, "text/plain", "Bad Request")
+                
+                cl.send(response.encode("utf-8"))
+
+            elif "GET /sensors" in request:
+                sensor_data = read_sensors()
+                json_data = json.dumps(sensor_data)
+                response = create_response(200, "application/json", json_data)
+                cl.send(response.encode("utf-8"))
+                print(f"센서 데이터 전송: {sensor_data}")
+                
+                if "error" not in sensor_data:
+                    display_text([
+                        f"T: {sensor_data['temperature']} C",
+                        f"H: {sensor_data['humidity']} %",
+                        f"L: {sensor_data['light']} lx",
+                        f"Alarm: {sensor_data['alarm']}"
+                    ])
+
+            elif "GET /" in request:
+                html = f"<html>...<body><h1>Pico Client Server</h1><p>IP: {ip_address}</p><p><a href='/sensors'>/sensors</a></p></body></html>"
+                response = create_response(200, "text/html", html)
+                cl.send(response.encode("utf-8"))
+
+            else:
+                response = create_response(404, "text/plain", "Not Found")
+                cl.send(response.encode("utf-8"))
+
+            cl.close()
+
+        except Exception as e:
+            print(f"서버 오류: {e}")
+            display_text(["Server Error", str(e)])
+            if 'cl' in locals():
+                cl.close()
+            time.sleep(1)
+
+
+# ---- 프로그램 시작 ----
+if __name__ == "__main__":
+    print("Pico 센서 서버 (WiFi Client, 3-Threshold, OLED) 시작...")
+    start_server()
