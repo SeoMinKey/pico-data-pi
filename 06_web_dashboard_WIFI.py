@@ -2,21 +2,22 @@ import network
 import socket
 import json
 import time
-from machine import Pin, I2C, PWM
+from machine import Pin, I2C, PWM, ADC
 import neopixel
 import ssd1306  # (추가) OLED
 from ahtx0 import AHT20
 from bh1750 import BH1750 # (추가) 조도
 
 # ---- WiFi 설정 (수업 환경에 맞게 수정) ----
-WIFI_SSID = "202004153"  # 학교/교육장 WiFi 이름
-WIFI_PASSWORD = "smk12345"  # WiFi 비밀번호
+WIFI_SSID = "#############"  # 학교/교육장 WiFi 이름
+WIFI_PASSWORD = "#############"  # WiFi 비밀번호
 
 # --- 2. 학습된 핀 번호 설정 ---
 I2C_SDA_PIN = 4     # I2C SDA (GP4)
 I2C_SCL_PIN = 5     # I2C SCL (GP5)
 BUZZER_PIN = 22     # 부저 (GP22)
 NEOPIXEL_PIN = 21   # 네오픽셀 (GP21)
+ADC_SENSOR_PIN = 28 # 마이크/수위 센서 (GP28)
 
 # --- 3. (추가) OLED 설정 ---
 OLED_WIDTH = 128
@@ -29,8 +30,18 @@ HIGH_THRESHOLD = 1000000.0
 alarm_thresholds = {
     "temperature": HIGH_THRESHOLD,
     "humidity": HIGH_THRESHOLD,
-    "light": HIGH_THRESHOLD
+    "light": HIGH_THRESHOLD,
+    "mic": HIGH_THRESHOLD,
+    "water": HIGH_THRESHOLD
 }
+
+# 센서 타입 선택 (기본값: "mic" - 마이크)
+sensor_type = "mic"  # "mic" 또는 "water"
+
+# 수위 센서 변환 상수 (06_01_water_height.py 참조)
+ADC_SLOPE = 0.0003       # m = 2.7 / 9000
+ADC_INTERCEPT = -13.7    # c = 1.3 - (0.0003 * 50000)
+MAX_TANK_DISTANCE = 50.0 # 최대 거리 (cm)
 
 # --- 5. 하드웨어 초기화 ---
 # I2C 버스 (온습도, 조도, OLED)
@@ -43,6 +54,9 @@ buzzer.duty_u16(0)
 
 # 네오픽셀
 np = neopixel.NeoPixel(Pin(NEOPIXEL_PIN), 1)
+
+# ADC 센서 (마이크/수위) 초기화
+adc_sensor = ADC(Pin(ADC_SENSOR_PIN))
 
 # OLED 초기화
 try:
@@ -146,17 +160,63 @@ def buzzer_on():
 def buzzer_off():
     buzzer.duty_u16(0)
 
-# --- 10. (수정) 3개 임계값 모두 확인하는 알람 함수 ---
-def check_alarms(temp, hum, light):
+# --- 10. (추가) 마이크 센서 읽기 함수 ---
+def read_mic_sensor():
+    """마이크 센서의 Peak-to-Peak 값을 읽습니다."""
+    sample_size = 100
+    max_val = 0
+    min_val = 65535
+    for _ in range(sample_size):
+        val = adc_sensor.read_u16()
+        if val > max_val:
+            max_val = val
+        if val < min_val:
+            min_val = val
+    peak_to_peak = max_val - min_val
+    return peak_to_peak
+
+# --- 11. (추가) 수위 센서 읽기 함수 ---
+def read_water_sensor():
+    """수위 센서의 ADC 값을 읽어 거리(cm)로 변환합니다."""
+    adc_value = adc_sensor.read_u16()
+    # 선형 공식 적용: distance_cm = ADC_SLOPE * adc_value + ADC_INTERCEPT
+    distance_cm = (ADC_SLOPE * adc_value) + ADC_INTERCEPT
+    # 거리는 0~MAX_TANK_DISTANCE 사이의 값으로 제한
+    distance_cm = max(0.0, min(MAX_TANK_DISTANCE, distance_cm))
+    return distance_cm, adc_value
+
+# --- 12. (수정) 모든 임계값 확인하는 알람 함수 ---
+def check_alarms(temp, hum, light, mic_value=None, water_value=None):
     """모든 센서의 임계값을 확인하고 알람을 울립니다."""
-    global alarm_thresholds # 전역 변수 사용
+    global alarm_thresholds, sensor_type # 전역 변수 사용
     
-    # 3개 중 하나라도 임계값을 넘으면 알람
-    temp_alarm = temp > alarm_thresholds["temperature"]
-    hum_alarm = hum > alarm_thresholds["humidity"]
-    light_alarm = light > alarm_thresholds["light"]
+    # 기존 센서들 확인 (임계값이 비활성화 상태가 아닐 때만 확인)
+    temp_alarm = False
+    if alarm_thresholds["temperature"] < HIGH_THRESHOLD:
+        temp_alarm = temp > alarm_thresholds["temperature"]
     
-    if temp_alarm or hum_alarm or light_alarm:
+    hum_alarm = False
+    if alarm_thresholds["humidity"] < HIGH_THRESHOLD:
+        hum_alarm = hum > alarm_thresholds["humidity"]
+    
+    light_alarm = False
+    if alarm_thresholds["light"] < HIGH_THRESHOLD:
+        light_alarm = light > alarm_thresholds["light"]
+    
+    # 선택된 센서 확인
+    adc_alarm = False
+    if sensor_type == "mic" and mic_value is not None:
+        # 마이크 임계값이 비활성화 상태가 아닐 때만 확인
+        if alarm_thresholds["mic"] < HIGH_THRESHOLD:
+            adc_alarm = mic_value > alarm_thresholds["mic"]
+    elif sensor_type == "water" and water_value is not None:
+        # 수위 센서는 거리가 작을수록(수위가 높을수록) 위험
+        # 임계값은 거리(cm)로 설정되므로, water_value가 임계값보다 작으면 알람
+        # 임계값이 비활성화 상태가 아닐 때만 확인
+        if alarm_thresholds["water"] < HIGH_THRESHOLD:
+            adc_alarm = water_value < alarm_thresholds["water"]
+    
+    if temp_alarm or hum_alarm or light_alarm or adc_alarm:
         buzzer_on()
         led_red()
         return True
@@ -165,23 +225,44 @@ def check_alarms(temp, hum, light):
         led_green()
         return False
 
-# --- 11. (수정) 2개 센서 데이터 읽기 함수 ---
+# --- 13. (수정) 모든 센서 데이터 읽기 함수 ---
 def read_sensors():
+    global sensor_type
     try:
         temperature = aht_sensor.temperature
         humidity = aht_sensor.relative_humidity
         lux = bh_sensor.measurement
 
-        # (수정) 3개 값을 check_alarms 함수로 전달
-        alarm_active = check_alarms(temperature, humidity, lux)
+        # 선택된 센서 타입에 따라 읽기
+        mic_value = None
+        water_value = None
+        water_adc = None
+        
+        if sensor_type == "mic":
+            mic_value = read_mic_sensor()
+        elif sensor_type == "water":
+            water_value, water_adc = read_water_sensor()
 
-        return {
+        # 알람 확인
+        alarm_active = check_alarms(temperature, humidity, lux, mic_value, water_value)
+
+        result = {
             "temperature": round(temperature, 1),
             "humidity": round(humidity, 1),
             "light": round(lux, 1),
+            "sensor_type": sensor_type,
             "timestamp": time.time(),
             "alarm": alarm_active,
         }
+        
+        # 선택된 센서 데이터 추가
+        if sensor_type == "mic":
+            result["mic"] = mic_value
+        elif sensor_type == "water":
+            result["water_distance"] = round(water_value, 2)
+            result["water_adc"] = water_adc
+
+        return result
     except Exception as e:
         print(f"센서 읽기 오류: {e}")
         buzzer_off()
@@ -200,9 +281,9 @@ def create_response(status_code, content_type, body):
     response += body
     return response
 
-# --- 13. 메인 서버 함수 (POST 처리 수정) ---
+# --- 14. 메인 서버 함수 (POST 처리 수정) ---
 def start_server():
-    global alarm_thresholds # 전역 변수 수정 허용
+    global alarm_thresholds, sensor_type # 전역 변수 수정 허용
     
     ip_address = connect_wifi()
     if not ip_address:
@@ -245,6 +326,31 @@ def start_server():
                 response = create_response(200, "text/plain", "")
                 cl.send(response.encode("utf-8"))
 
+            # (추가) POST /sensor_type 요청 처리 (센서 타입 변경)
+            elif "POST /sensor_type" in request:
+                try:
+                    content_length_start = request.find("Content-Length: ") + 16
+                    content_length_end = request.find("\r\n", content_length_start)
+                    content_length = int(request[content_length_start:content_length_end])
+                    
+                    body_start = request.find("\r\n\r\n") + 4
+                    body = request[body_start : body_start + content_length]
+                    
+                    data = json.loads(body)
+                    
+                    if "type" in data and data["type"] in ["mic", "water"]:
+                        sensor_type = data["type"]
+                        print(f"센서 타입 변경됨: {sensor_type}")
+                        display_text(["Sensor Type", f"Changed to:", f"{sensor_type.upper()}"])
+                        response = create_response(200, "application/json", json.dumps({"status": "ok", "sensor_type": sensor_type}))
+                    else:
+                        response = create_response(400, "text/plain", "Invalid sensor type")
+                except Exception as e:
+                    print(f"센서 타입 변경 오류: {e}")
+                    response = create_response(400, "text/plain", "Bad Request")
+                
+                cl.send(response.encode("utf-8"))
+
             # (수정) POST /alarm_threshold 요청 처리
             elif "POST /alarm_threshold" in request:
                 try:
@@ -265,6 +371,10 @@ def start_server():
                         alarm_thresholds["humidity"] = float(new_thresholds["humidity"])
                     if "light" in new_thresholds:
                         alarm_thresholds["light"] = float(new_thresholds["light"])
+                    if "mic" in new_thresholds:
+                        alarm_thresholds["mic"] = float(new_thresholds["mic"])
+                    if "water" in new_thresholds:
+                        alarm_thresholds["water"] = float(new_thresholds["water"])
                         
                     print(f"임계값 업데이트됨: {alarm_thresholds}")
                     
@@ -272,7 +382,9 @@ def start_server():
                     t_str = format_threshold(alarm_thresholds['temperature'])
                     h_str = format_threshold(alarm_thresholds['humidity'])
                     l_str = format_threshold(alarm_thresholds['light'])
-                    display_text(["Thresholds SET", f"T: {t_str}", f"H: {h_str}", f"L: {l_str}"])
+                    m_str = format_threshold(alarm_thresholds['mic'])
+                    w_str = format_threshold(alarm_thresholds['water'])
+                    display_text(["Thresholds SET", f"T:{t_str} H:{h_str}", f"L:{l_str} M:{m_str}", f"W:{w_str}"])
                     
                     response = create_response(200, "application/json", json.dumps({"status": "ok", "thresholds": alarm_thresholds}))
                 except Exception as e:
@@ -289,12 +401,16 @@ def start_server():
                 print(f"센서 데이터 전송: {sensor_data}")
                 
                 if "error" not in sensor_data:
-                    display_text([
+                    lines = [
                         f"T: {sensor_data['temperature']} C",
                         f"H: {sensor_data['humidity']} %",
-                        f"L: {sensor_data['light']} lx",
-                        f"Alarm: {sensor_data['alarm']}"
-                    ])
+                        f"L: {sensor_data['light']} lx"
+                    ]
+                    if sensor_data['sensor_type'] == "mic" and "mic" in sensor_data:
+                        lines.append(f"Mic: {sensor_data['mic']}")
+                    elif sensor_data['sensor_type'] == "water" and "water_distance" in sensor_data:
+                        lines.append(f"W: {sensor_data['water_distance']} cm")
+                    display_text(lines)
 
             elif "GET /" in request:
                 html = f"<html>...<body><h1>Pico Client Server</h1><p>IP: {ip_address}</p><p><a href='/sensors'>/sensors</a></p></body></html>"
