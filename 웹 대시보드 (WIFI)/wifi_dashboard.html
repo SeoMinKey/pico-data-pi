@@ -811,6 +811,7 @@
         
         // (추가) 마이크/수위 센서 데이터 업데이트
         const sensorType = data.sensor_type || "mic";
+        setSensorTypeUI(sensorType);
         const adcSensorIcon = document.getElementById("adcSensorIcon");
         const adcSensorLabel = document.getElementById("adcSensorLabel");
         const adcSensorValue = document.getElementById("adcSensorValue");
@@ -1022,6 +1023,23 @@
         }
       }
 
+      // (추가) 센서 타입 UI 갱신 함수
+      function setSensorTypeUI(newType) {
+        const select = document.getElementById("sensorTypeSelect");
+        if (select.value !== newType) {
+          select.value = newType;
+        }
+        const micGroup = document.getElementById("micAlarmGroup");
+        const waterGroup = document.getElementById("waterAlarmGroup");
+        if (newType === "mic") {
+          micGroup.style.display = "flex";
+          waterGroup.style.display = "none";
+        } else {
+          micGroup.style.display = "none";
+          waterGroup.style.display = "flex";
+        }
+      }
+
       // (추가) 센서 타입 변경 함수
       async function changeSensorType(newType) {
         const ip = document.getElementById("picoIP").value;
@@ -1040,14 +1058,7 @@
           
           if (response.ok) {
             console.log(`센서 타입 변경 성공: ${newType}`);
-            // UI 업데이트
-            if (newType === "mic") {
-              document.getElementById("micAlarmGroup").style.display = "flex";
-              document.getElementById("waterAlarmGroup").style.display = "none";
-            } else {
-              document.getElementById("micAlarmGroup").style.display = "none";
-              document.getElementById("waterAlarmGroup").style.display = "flex";
-            }
+            setSensorTypeUI(newType);
             // 현재 임계값 전송
             sendAlarmThresholds();
           } else {
