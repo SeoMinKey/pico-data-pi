@@ -38,10 +38,9 @@ alarm_thresholds = {
 # 센서 타입 선택 (기본값: "mic" - 마이크)
 sensor_type = "mic"  # "mic" 또는 "water"
 
-# 수위 센서 변환 상수 (06_01_water_height.py 참조)
-ADC_SLOPE = 0.0003       # m = 2.7 / 9000
-ADC_INTERCEPT = -13.7    # c = 1.3 - (0.0003 * 50000)
-MAX_TANK_DISTANCE = 50.0 # 최대 거리 (cm)
+# 수위 센서 최대 거리 설정
+# 40mm = 4cm 를 최대 거리로 사용
+MAX_TANK_DISTANCE = 4.0  # 최대 거리 (cm, 40mm)
 
 # --- 5. 하드웨어 초기화 ---
 # I2C 버스 (온습도, 조도, OLED)
@@ -177,12 +176,15 @@ def read_mic_sensor():
 
 # --- 11. (추가) 수위 센서 읽기 함수 ---
 def read_water_sensor():
-    """수위 센서의 ADC 값을 읽어 거리(cm)로 변환합니다."""
+    """
+    수위 센서의 ADC 값을 읽어 0~MAX_TANK_DISTANCE(cm) 범위로 선형 매핑합니다.
+    - raw ADC 범위: 0 ~ 65535
+    - 거리(cm) = (adc_value / 65535) * MAX_TANK_DISTANCE
+    (반환값: distance_cm, raw_adc_value)
+    """
     adc_value = adc_sensor.read_u16()
-    # 선형 공식 적용: distance_cm = ADC_SLOPE * adc_value + ADC_INTERCEPT
-    distance_cm = (ADC_SLOPE * adc_value) + ADC_INTERCEPT
-    # 거리는 0~MAX_TANK_DISTANCE 사이의 값으로 제한
-    distance_cm = max(0.0, min(MAX_TANK_DISTANCE, distance_cm))
+    # 0~65535 범위를 0~MAX_TANK_DISTANCE(cm)로 단순 매핑
+    distance_cm = (adc_value / 65535.0) * MAX_TANK_DISTANCE
     return distance_cm, adc_value
 
 # --- 12. (수정) 모든 임계값 확인하는 알람 함수 ---
@@ -210,11 +212,10 @@ def check_alarms(temp, hum, light, mic_value=None, water_value=None):
         if alarm_thresholds["mic"] < HIGH_THRESHOLD:
             adc_alarm = mic_value > alarm_thresholds["mic"]
     elif sensor_type == "water" and water_value is not None:
-        # 수위 센서는 거리가 작을수록(수위가 높을수록) 위험
-        # 임계값은 거리(cm)로 설정되므로, water_value가 임계값보다 작으면 알람
+        # 수위 센서는 수위(거리 값)가 임계값을 넘었을 때를 "위험"으로 판단
         # 임계값이 비활성화 상태가 아닐 때만 확인
         if alarm_thresholds["water"] < HIGH_THRESHOLD:
-            adc_alarm = water_value < alarm_thresholds["water"]
+            adc_alarm = water_value > alarm_thresholds["water"]
     
     if temp_alarm or hum_alarm or light_alarm or adc_alarm:
         buzzer_on()

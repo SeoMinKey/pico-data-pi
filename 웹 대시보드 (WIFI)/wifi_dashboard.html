@@ -472,7 +472,7 @@
           <span id="micAlarmValue">비활성화</span>
         </div>
         
-        <!-- (추가) 수위 알람 임계점 슬라이더 -->
+        <!-- (추가) 수위 알람 임계점 슬라이더 (0~4cm, 40mm) -->
         <div class="control-group" id="waterAlarmGroup" style="display: none;">
           <label for="waterAlarmSlider">수위 알람 임계점 (cm)</label>
           <input
@@ -480,9 +480,9 @@
             id="waterAlarmSlider"
             class="slider"
             min="0"
-            max="50"
-            step="1"
-            value="50"
+            max="4"
+            step="0.1"
+            value="4"
           />
           <span id="waterAlarmValue">비활성화</span>
         </div>
@@ -729,7 +729,7 @@
         if (thresholds.humidity >= 100) thresholds.humidity = highValue;
         if (thresholds.light >= 1000) thresholds.light = highValue;
         if (thresholds.mic && thresholds.mic >= 5000) thresholds.mic = highValue;
-        if (thresholds.water && thresholds.water >= 50) thresholds.water = highValue;
+        if (thresholds.water && thresholds.water >= 4) thresholds.water = highValue;
 
         console.log("새 임계값 전송 시도:", thresholds);
         
@@ -867,8 +867,8 @@
           adcSensorStatus.className = micAlarmActive ? "metric-status danger" : "metric-status normal";
         } else if (sensorType === "water" && data.water_distance !== undefined) {
           const waterThreshold = parseFloat(document.getElementById("waterAlarmSlider").value);
-          // 수위는 거리가 작을수록(수위가 높을수록) 위험하므로 반대로 비교
-          const waterAlarmActive = waterThreshold < 50 && data.water_distance < waterThreshold;
+          // 수위는 임계값을 넘어섰을 때 위험으로 표시
+          const waterAlarmActive = waterThreshold < 4 && data.water_distance > waterThreshold;
           adcSensorStatus.textContent = waterAlarmActive ? "위험" : "정상";
           adcSensorStatus.className = waterAlarmActive ? "metric-status danger" : "metric-status normal";
         }
@@ -932,8 +932,8 @@
           const waterThreshold = parseFloat(document.getElementById("waterAlarmSlider").value);
           adcChart.data.labels.push(now);
           adcChart.data.datasets[0].data.push(data.water_distance);
-          // 수위는 거리가 작을수록 위험하므로 임계값은 반대로 표시
-          adcChart.data.datasets[1].data.push(waterThreshold >= 50 ? null : waterThreshold);
+          // 임계값을 기준선으로 사용 (수위가 이 값을 넘으면 위험)
+          adcChart.data.datasets[1].data.push(waterThreshold >= 4 ? null : waterThreshold);
         }
         
         if (adcChart.data.labels.length > 20) {
@@ -1119,7 +1119,7 @@
         waterSlider.addEventListener("input", () => {
           const val = parseFloat(waterSlider.value);
           document.getElementById("waterAlarmValue").textContent = 
-            (val >= 50) ? "비활성화" : val.toFixed(1) + " cm";
+            (val >= 4) ? "비활성화" : val.toFixed(1) + " cm";
         });
         
         micSlider.addEventListener("change", sendAlarmThresholds);
@@ -1140,7 +1140,7 @@
             humSlider.value = 100;
             lightSlider.value = 1000;
             micSlider.value = 5000;
-            waterSlider.value = 50;
+            waterSlider.value = 4;
             document.getElementById("tempAlarmValue").textContent = "비활성화";
             document.getElementById("humAlarmValue").textContent = "비활성화";
             document.getElementById("lightAlarmValue").textContent = "비활성화";
